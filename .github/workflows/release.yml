@@ -1,0 +1,56 @@
+name: Build and publish Trapka
+on:
+  push:
+    branches: [main]
+    paths: ['source/**', 'tests/**', 'release-notes.md', '.github/workflows/release.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore pinned runtime and model resources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Join-Path $env:RUNNER_TEMP 'Trapka-v0.7-base.exe'
+          Invoke-WebRequest 'https://github.com/Deniska72/trapka-updates/releases/download/v0.7.0/Trapka.exe' -OutFile $base
+          if ((Get-FileHash -LiteralPath $base -Algorithm SHA256).Hash -ne 'FB1C1A1872BFAD02DF992FF7F6D0CBBF381966F99194D093D6447443ACF6F8FF') { throw 'Pinned resource bundle hash mismatch' }
+          $assembly = [Reflection.Assembly]::LoadFile($base)
+          New-Item -ItemType Directory source/assets -Force | Out-Null
+          foreach ($name in @('onnxruntime.dll','onnxruntime_providers_shared.dll','yolox_tiny.onnx','yolox_nano.onnx','ORT-LICENSE.txt','ORT-NOTICES.txt','YOLOX-LICENSE.txt')) {
+            $resourceStream = $assembly.GetManifestResourceStream('Trapka.' + $name)
+            if ($null -eq $resourceStream) { throw "Missing resource $name" }
+            $resourceOutput = [IO.File]::Create((Join-Path (Get-Location) ('source/assets/' + $name)))
+            try { $resourceStream.CopyTo($resourceOutput) } finally { $resourceOutput.Dispose(); $resourceStream.Dispose() }
+          }
+          [IO.File]::WriteAllBytes((Join-Path (Get-Location) 'source/Trapka.ico'), [Convert]::FromBase64String([IO.File]::ReadAllText((Join-Path (Get-Location) 'source/Trapka.ico.base64'))))
+      - name: Verify motion tracking
+        shell: pwsh
+        run: |
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:exe /platform:x64 /main:TrackerTests /out:TrackerTests.exe /reference:System.Drawing.dll tests/TrackerTests.cs source/Tracking.cs source/Vision.cs source/Updates.cs
+          if ($LASTEXITCODE -ne 0) { throw 'Test compilation failed' }
+          & .\TrackerTests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Tracking verification failed' }
+      - name: Build release
+        shell: cmd
+        run: source\build.cmd
+      - name: Package and publish immutable release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = [Reflection.AssemblyName]::GetAssemblyName((Join-Path (Get-Location) 'source/Trapka.exe')).Version
+          $tag = 'v' + $version.Major + '.' + $version.Minor + '.' + $version.Build
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists. Increase AssemblyVersion; published binaries are never replaced." }
+          Copy-Item source/Trapka.exe Trapka.exe
+          Compress-Archive -LiteralPath Trapka.exe,release-notes.md -DestinationPath Trapka.zip
+          Compress-Archive -LiteralPath source -DestinationPath Trapka-source.zip
+          gh release create $tag Trapka.exe Trapka.zip Trapka-source.zip --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Trapka $tag — tracking improvements" --notes-file release-notes.md --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+          Write-Output "Published $tag. The signed update feed is activated separately by the publisher."
