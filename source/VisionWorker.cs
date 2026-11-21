@@ -19,6 +19,8 @@ class VisionWorker : IDisposable {
     readonly Frame[] pool = new Frame[6];
     readonly AutoResetEvent available = new AutoResetEvent(false);
     readonly Thread captureThread, inferenceThread;
+    readonly Action<Rectangle, Bitmap> captureOverride;
+    readonly Func<Bitmap, float, Detection[]> detectionOverride;
     volatile bool stopped;
     Rectangle area;
     bool enabled, fastMode = true;
@@ -30,7 +32,8 @@ class VisionWorker : IDisposable {
     int latestAt, captureCount, detectionCount, maxFound;
     long sequence, totalCaptureMs, totalInferenceMs;
     string status = "Starting frame tracker…";
-    public VisionWorker() {
+    public VisionWorker(Action<Rectangle, Bitmap> capture = null, Func<Bitmap, float, Detection[]> detect = null) {
+        captureOverride = capture; detectionOverride = detect;
         captureThread = new Thread(Capture) { IsBackground = true, Priority = ThreadPriority.Normal, Name = "Trapka frame tracker" };
         inferenceThread = new Thread(Infer) { IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = "Trapka recognition" };
         captureThread.Start(); inferenceThread.Start();
@@ -59,6 +62,8 @@ class VisionWorker : IDisposable {
         lock (gate) return unchecked((uint)(Environment.TickCount - latestAt)) > 90 ? new Detection[0] : latest;
     }
     public string Status { get { lock (gate) return status; } }
+    public int CapturedFrames { get { lock (gate) return captureCount; } }
+    public int RecognizedFrames { get { lock (gate) return detectionCount; } }
     public string Diagnostics {
         get { lock (gate) return status + "; capture/track frames: " + captureCount + "; mean capture/track ms: " + (captureCount == 0 ? 0 : totalCaptureMs / captureCount) + "; recognition frames: " + detectionCount + "; mean inference ms: " + (detectionCount == 0 ? 0 : totalInferenceMs / detectionCount) + "; max detections: " + maxFound; }
     }
@@ -95,7 +100,7 @@ class VisionWorker : IDisposable {
                 Recognition recognition = null;
                 try {
                     frame.Tick = Environment.TickCount; frame.Generation = frameGeneration; frame.Sequence = ++sequence;
-                    try { ScaledScreenCapture.Capture(target, frame.Image); Gray(frame, ref scratch); }
+                    try { if (captureOverride == null) ScaledScreenCapture.Capture(target, frame.Image); else captureOverride(target, frame.Image); Gray(frame, ref scratch); }
                     catch (System.ComponentModel.Win32Exception) { lock (gate) { latest = new Detection[0]; status = "Capture paused"; } Thread.Sleep(30); continue; }
                     if (previous != null && previous.Generation == frameGeneration && previous.Image.Width == width && previous.Image.Height == height)
                         tracks = PixelTracker.Advance(previous.Gray, frame.Gray, width, height, tracks, unchecked((uint)(frame.Tick - previous.Tick)));
@@ -127,7 +132,7 @@ class VisionWorker : IDisposable {
     void Infer() {
         PersonDetector detector = null; bool detectorFast = true; long detectedSequence = -1;
         try {
-            string root = VisionAssets.Ensure();
+            string root = detectionOverride == null ? VisionAssets.Ensure() : null;
             while (!stopped) {
                 available.WaitOne(50);
                 Frame frame = null; bool fast; float threshold;
@@ -138,11 +143,11 @@ class VisionWorker : IDisposable {
                 if (frame == null) continue;
                 var watch = Stopwatch.StartNew();
                 try {
-                    if (detector == null || detectorFast != fast) {
+                    if (detectionOverride == null && (detector == null || detectorFast != fast)) {
                         if (detector != null) detector.Dispose(); detector = null;
                         detector = new PersonDetector(root, fast); detectorFast = fast;
                     }
-                    var result = detector.Detect(frame.Image, threshold);
+                    var result = detectionOverride == null ? detector.Detect(frame.Image, threshold) : detectionOverride(frame.Image, threshold);
                     if (result.Length > 12) { var strongest = new Detection[12]; Array.Copy(result, strongest, 12); result = strongest; }
                     lock (gate) {
                         detectedSequence = frame.Sequence;

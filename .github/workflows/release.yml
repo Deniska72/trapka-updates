@@ -31,10 +31,16 @@ jobs:
       - name: Verify motion tracking
         shell: pwsh
         run: |
-          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:exe /platform:x64 /main:TrackerTests /out:TrackerTests.exe /reference:System.Drawing.dll tests/TrackerTests.cs source/Tracking.cs source/Vision.cs source/Updates.cs
+          $testSources = @('tests\TrackerTests.cs','source\Tracking.cs','source\Vision.cs','source\VisionWorker.cs','source\Updates.cs') | ForEach-Object { Join-Path (Get-Location) $_ }
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:exe /platform:x64 /main:TrackerTests /out:TrackerTests.exe /reference:System.Drawing.dll $testSources
           if ($LASTEXITCODE -ne 0) { throw 'Test compilation failed' }
           & .\TrackerTests.exe
           if ($LASTEXITCODE -ne 0) { throw 'Tracking verification failed' }
+          $pipelineSources = @('tests\PipelineTests.cs','source\Tracking.cs','source\Vision.cs','source\VisionWorker.cs','source\Updates.cs') | ForEach-Object { Join-Path (Get-Location) $_ }
+          & "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:exe /platform:x64 /main:PipelineTests /out:PipelineTests.exe /reference:System.Drawing.dll $pipelineSources
+          if ($LASTEXITCODE -ne 0) { throw 'Pipeline test compilation failed' }
+          & .\PipelineTests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Asynchronous tracking verification failed' }
       - name: Build release
         shell: cmd
         run: source\build.cmd
